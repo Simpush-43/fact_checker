@@ -1,4 +1,5 @@
 import strawberry
+import traceback  # <-- Added traceback import
 from typing import List, Optional
 from app.agent import fact_check
 from app.database import save_fact_check, get_all_logs
@@ -87,33 +88,49 @@ class Mutation:
 
     @strawberry.mutation(description="Submit a claim to be fact-checked by the AI agent")
     async def fact_check_claim(self, claim: str) -> FactCheckResult:
-        # 1. Run AI agent (Playwright + Gemini)
-        result = await fact_check(claim)
+        try:
+            print(f"\n🚀 --- STARTING PIPELINE FOR: {claim} ---")
+            
+            # 1. Run AI agent (Playwright + Gemini)
+            result = await fact_check(claim)
+            print("✅ --- AGENT FINISHED, SAVING TO POSTGRES ---")
 
-        # 2. Save to PostgreSQL
-        await save_fact_check(claim, result)
+            # 2. Save to PostgreSQL
+            await save_fact_check(claim, result)
+            print("✅ --- POSTGRES SAVED, SAVING TO NEO4J ---")
 
-        # 3. Save relationships to Neo4j
-        save_claim_graph(
-            claim=claim,
-            verdict=result["verdict"],
-            sources=result.get("sources", []),
-            supporting=result.get("supporting_sources", []),
-            contradicting=result.get("contradicting_sources", [])
-        )
+            # 3. Save relationships to Neo4j
+            save_claim_graph(
+                claim=claim,
+                verdict=result.get("verdict", "UNVERIFIED"),
+                sources=result.get("sources", []),
+                supporting=result.get("supporting_sources", []),
+                contradicting=result.get("contradicting_sources", [])
+            )
+            print("✅ --- NEO4J SAVED, FORMATTING RESULT ---")
 
-        return FactCheckResult(
-            claim=claim,
-            verdict=result["verdict"],
-            credibility_score=result["credibility_score"],
-            explanation=result["explanation"],
-            supporting_sources=result.get("supporting_sources", []),
-            contradicting_sources=result.get("contradicting_sources", []),
-            sources=[
-                SourceType(title=s["title"], url=s["url"], snippet=s.get("snippet", ""))
-                for s in result.get("sources", [])
-            ]
-        )
+            return FactCheckResult(
+                claim=claim,
+                verdict=result.get("verdict", "UNVERIFIED"),
+                credibility_score=result.get("credibility_score", 0.0),
+                explanation=result.get("explanation", "No explanation provided."),
+                supporting_sources=result.get("supporting_sources", []),
+                contradicting_sources=result.get("contradicting_sources", []),
+                sources=[
+                    SourceType(
+                        title=s.get("title", "Unknown Title"), 
+                        url=s.get("url", ""), 
+                        snippet=s.get("snippet", "")
+                    )
+                    for s in result.get("sources", [])
+                ]
+            )
+
+        except Exception as e:
+            # THIS forces the exact error to print in the Uvicorn terminal
+            print("\n🚨 CRASH IN SCHEMA.PY RESOLVER 🚨")
+            traceback.print_exc()
+            raise e
 
 
 schema = strawberry.Schema(query=Query, mutation=Mutation)
